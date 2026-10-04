@@ -1,0 +1,384 @@
+import pandas as pd
+import numpy as np
+import joblib
+
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import OneHotEncoder, MultiLabelBinarizer
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.multioutput import MultiOutputClassifier
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import confusion_matrix
+
+# ---------------------------------------------------------
+# 1. Load dataset
+# ---------------------------------------------------------
+df = pd.read_csv("treatment_dataset.csv")
+
+print("Loaded dataset with shape:", df.shape)
+print(df.head())
+
+# ---------------------------------------------------------
+# 2. Create Model C labels (pattern-level, NOT therapy-type)
+# ---------------------------------------------------------
+
+# --- Treatment Cluster (style, not specific therapy name) ---
+def map_treatment_cluster(row):
+    therapy = str(row["Therapy Type"]).lower()
+    diag = str(row["Diagnosis"]).lower()
+
+    # Interpersonal / relational style
+    if "interpersonal" in therapy:
+        return "interpersonal"
+
+    # Dialectical / emotion regulation style
+    if "dialectical" in therapy:
+        return "emotion_regulation"
+
+    # Mindfulness-based style
+    if "mindful" in therapy:
+        return "mindfulness"
+
+    # CBT or similar cognitive-behavioural style
+    if "cbt" in therapy:
+        return "cognitive_behavioural"
+
+    # Fallbacks based on diagnosis (pattern only, not therapy name)
+    if "anxiety" in diag:
+        return "cognitive_behavioural"
+    if "depress" in diag:
+        return "cognitive_behavioural"
+    if "bipolar" in diag:
+        return "emotion_regulation"
+
+    # Generic fallback
+    return "behavioural_support"
+
+
+# --- Treatment Focus ---
+def map_treatment_focus(row):
+    diag = str(row["Diagnosis"]).lower()
+    therapy = str(row["Therapy Type"]).lower()
+
+    # If explicitly interpersonal therapy
+    if "interpersonal" in therapy:
+        return "interpersonal"
+
+    # If mindfulness-based
+    if "mindful" in therapy:
+        return "emotions"
+
+    # If dialectical
+    if "dialectical" in therapy:
+        return "emotions"
+
+    # Diagnosis-driven focus
+    if "depress" in diag:
+        return "thoughts"
+    if "anxiety" in diag:
+        return "behaviours"
+    if "bipolar" in diag:
+        return "emotions"
+
+    # Fallback
+    return "lifestyle"
+
+
+# --- Suggested Methods (multi-label) ---
+def map_suggested_methods(row):
+    therapy = str(row["Therapy Type"]).lower()
+    diag = str(row["Diagnosis"]).lower()
+
+    methods = []
+
+    # Interpersonal Therapy patterns
+    if "interpersonal" in therapy:
+        methods += ["interpersonal problem solving", "boundary setting", "communication analysis"]
+
+    # CBT / cognitive-behavioural patterns
+    if "cbt" in therapy or "depress" in diag:
+        methods += ["cognitive reframing", "behavioural activation", "thought record"]
+
+    # Anxiety-focused patterns
+    if "anxiety" in diag:
+        methods += ["exposure hierarchy", "grounding", "worry log"]
+
+    # Mindfulness-based patterns
+    if "mindful" in therapy:
+        methods += ["mindfulness breathing", "body scan", "present-moment awareness"]
+
+    # Dialectical / emotion regulation patterns
+    if "dialectical" in therapy:
+        methods += ["distress tolerance", "emotion regulation", "radical acceptance"]
+
+    # Fallback
+    if not methods:
+        methods = ["behavioural activation"]
+
+    # Deduplicate
+    methods = list(sorted(set(methods)))
+    return methods
+
+
+df["cluster"] = df.apply(map_treatment_cluster, axis=1)
+df["focus"] = df.apply(map_treatment_focus, axis=1)
+df["methods_list"] = df.apply(map_suggested_methods, axis=1)
+
+print("\nLabel examples:")
+print(df[["cluster", "focus", "methods_list"]].head())
+
+# ---------------------------------------------------------
+# 3. Multi-label encoding for methods
+# ---------------------------------------------------------
+mlb = MultiLabelBinarizer()
+methods_matrix = mlb.fit_transform(df["methods_list"])
+
+methods_cols = [f"method_{m}" for m in mlb.classes_]
+methods_df = pd.DataFrame(methods_matrix, columns=methods_cols, index=df.index)
+
+df = pd.concat([df, methods_df], axis=1)
+
+# ---------------------------------------------------------
+# 4. Encode targets (cluster, focus, methods)
+# ---------------------------------------------------------
+
+# Encode cluster (string → integer)
+le_cluster = LabelEncoder()
+df["cluster_encoded"] = le_cluster.fit_transform(df["cluster"])
+
+# Encode focus (string → integer)
+le_focus = LabelEncoder()
+df["focus_encoded"] = le_focus.fit_transform(df["focus"])
+
+# Multi-label methods already encoded as 0/1
+y = pd.concat([
+    df["cluster_encoded"],
+    df["focus_encoded"],
+    df[methods_cols]
+], axis=1)
+
+# ---------------------------------------------------------
+# 5. Define features (X)
+# ---------------------------------------------------------
+feature_cols_num = [
+    "Symptom Severity (1-10)",
+    "Mood Score (1-10)",
+    "Sleep Quality (1-10)",
+    "Physical Activity (hrs/week)",
+    "Stress Level (1-10)",
+    "Treatment Progress (1-10)",
+    "Adherence to Treatment (%)"
+]
+
+feature_cols_cat = [
+    "Diagnosis",
+    "AI-Detected Emotional State"
+]
+
+X = df[feature_cols_num + feature_cols_cat]
+
+# ---------------------------------------------------------
+# 6. Preprocessing + Model
+# ---------------------------------------------------------
+numeric_transformer = "passthrough"
+categorical_transformer = OneHotEncoder(handle_unknown="ignore")
+
+preprocessor = ColumnTransformer(
+    transformers=[
+        ("num", numeric_transformer, feature_cols_num),
+        ("cat", categorical_transformer, feature_cols_cat),
+    ]
+)
+
+base_clf = RandomForestClassifier(
+    n_estimators=250,
+    random_state=42,
+    class_weight="balanced"
+)
+
+model = Pipeline(
+    steps=[
+        ("preprocess", preprocessor),
+        ("clf", MultiOutputClassifier(base_clf))
+    ]
+)
+
+# ---------------------------------------------------------
+# 7. Train/test split
+# ---------------------------------------------------------
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y,
+    test_size=0.2,
+    random_state=42
+)
+
+# ---------------------------------------------------------
+# 8. Train model
+# ---------------------------------------------------------
+print("\nTraining Model C (pattern-level)...")
+model.fit(X_train, y_train)
+print("Training complete.")
+
+# ---------------------------------------------------------
+# 9. Evaluate
+# ---------------------------------------------------------
+y_pred = model.predict(X_test)
+y_pred_df = pd.DataFrame(y_pred, columns=y.columns)
+
+print("\n=== CLUSTER REPORT ===")
+print(classification_report(y_test["cluster_encoded"], y_pred_df["cluster_encoded"]))
+
+print("\n=== FOCUS REPORT ===")
+print(classification_report(y_test["focus_encoded"], y_pred_df["focus_encoded"]))
+
+print("\n=== METHODS REPORT (multi-label) ===")
+for col in methods_cols:
+    print(f"\nReport for {col}:")
+    print(classification_report(y_test[col], y_pred_df[col]))
+
+
+
+# ============================================================
+# Confusion Matrix – Cluster 
+# ============================================================
+
+print("\nGenerating confusion matrix for CLUSTER...")
+
+# True + Predicted labels
+y_true_cluster = y_test["cluster_encoded"]
+y_pred_cluster = y_pred_df["cluster_encoded"]
+
+# Build confusion matrix
+cm_cluster = confusion_matrix(y_true_cluster, y_pred_cluster)
+print("Raw confusion matrix (cluster):")
+print(cm_cluster)
+
+# Convert confusion matrix into TP/FP/FN/TN per class
+num_classes_cluster = cm_cluster.shape[0]
+metrics_cluster = []
+
+for cls in range(num_classes_cluster):
+    TP = cm_cluster[cls, cls]
+    FP = cm_cluster[:, cls].sum() - TP
+    FN = cm_cluster[cls, :].sum() - TP
+    TN = cm_cluster.sum() - (TP + FP + FN)
+
+    metrics_cluster.append({
+        "Class": f"{cls} – {le_cluster.classes_[cls]}",
+        "True Positive": TP,
+        "False Positive": FP,
+        "False Negative": FN,
+        "True Negative": TN
+    })
+
+df_cluster_metrics = pd.DataFrame(metrics_cluster)
+print("\nPer-class confusion table (cluster):")
+print(df_cluster_metrics.to_markdown())
+
+# Overall accuracy
+total_TP = np.trace(cm_cluster)
+total_samples = cm_cluster.sum()
+accuracy = (total_TP / total_samples) * 100
+
+print(f"\nOverall CLUSTER accuracy: {accuracy:.2f}%")
+
+# ============================================================
+# Confusion Matrix – Focus 
+# ============================================================
+
+print("\nGenerating confusion matrix for FOCUS...")
+
+# True + Predicted labels
+y_true_focus = y_test["focus_encoded"]
+y_pred_focus = y_pred_df["focus_encoded"]
+
+# Build confusion matrix
+cm_focus = confusion_matrix(y_true_focus, y_pred_focus)
+print("Raw confusion matrix (focus):")
+print(cm_focus)
+
+# Convert confusion matrix into TP/FP/FN/TN per class
+num_classes_focus = cm_focus.shape[0]
+metrics_focus = []
+
+for cls in range(num_classes_focus):
+    TP = cm_focus[cls, cls]
+    FP = cm_focus[:, cls].sum() - TP
+    FN = cm_focus[cls, :].sum() - TP
+    TN = cm_focus.sum() - (TP + FP + FN)
+
+    metrics_focus.append({
+        "Class": f"{cls} – {le_focus.classes_[cls]}",
+        "True Positive": TP,
+        "False Positive": FP,
+        "False Negative": FN,
+        "True Negative": TN
+    })
+
+df_focus_metrics = pd.DataFrame(metrics_focus)
+print("\nPer-class confusion table (focus):")
+print(df_focus_metrics.to_markdown())
+
+# Overall accuracy
+total_TP = np.trace(cm_focus)
+total_samples = cm_focus.sum()
+accuracy = (total_TP / total_samples) * 100
+
+print(f"\nOverall FOCUS accuracy: {accuracy:.2f}%")
+
+# ============================================================
+# Confusion Matrices – Multi-label METHODS 
+# ============================================================
+
+print("\nGenerating confusion matrices for METHODS...")
+
+method_metrics_all = {}
+
+for col in methods_cols:
+    y_true_m = y_test[col]
+    y_pred_m = y_pred_df[col]
+
+    cm_m = confusion_matrix(y_true_m, y_pred_m)
+    print(f"\nRaw confusion matrix for {col}:")
+    print(cm_m)
+
+    # TP/FP/FN/TN for binary classification
+    TP = cm_m[1, 1] if cm_m.shape == (2, 2) else 0
+    FP = cm_m[0, 1] if cm_m.shape == (2, 2) else 0
+    FN = cm_m[1, 0] if cm_m.shape == (2, 2) else 0
+    TN = cm_m[0, 0] if cm_m.shape == (2, 2) else 0
+
+    df_m = pd.DataFrame([{
+        "Method": col,
+        "True Positive": TP,
+        "False Positive": FP,
+        "False Negative": FN,
+        "True Negative": TN
+    }])
+
+    print(f"\nConfusion table for {col}:")
+    print(df_m.to_markdown())
+
+    # Accuracy
+    total = TP + FP + FN + TN
+    acc = (TP + TN) / total * 100 if total > 0 else 0
+    print(f"Accuracy for {col}: {acc:.2f}%")
+
+    method_metrics_all[col] = df_m
+
+
+# ---------------------------------------------------------
+# 10. Save model + encoders
+# ---------------------------------------------------------
+joblib.dump(model, "modelC_treatment_pattern.pkl")
+joblib.dump(mlb, "modelC_methods_mlb.pkl")
+joblib.dump(le_cluster, "modelC_cluster_encoder.pkl")
+joblib.dump(le_focus, "modelC_focus_encoder.pkl")
+
+print("\nSaved:")
+print(" - modelC_treatment_pattern.pkl")
+print(" - modelC_methods_mlb.pkl")
+print(" - modelC_cluster_encoder.pkl")
+print(" - modelC_focus_encoder.pkl")

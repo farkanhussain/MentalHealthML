@@ -1,0 +1,121 @@
+import pandas as pd
+import numpy as np
+import joblib
+
+# ---------------------------------------------------------
+# Load Model C + Encoders
+# ---------------------------------------------------------
+model = joblib.load("modelC_treatment_pattern.pkl")
+mlb = joblib.load("modelC_methods_mlb.pkl")
+le_cluster = joblib.load("modelC_cluster_encoder.pkl")
+le_focus = joblib.load("modelC_focus_encoder.pkl")
+
+print("Model C + encoders loaded successfully.")
+
+
+# ---------------------------------------------------------
+# Helper: Build a single-row DataFrame for prediction
+# ---------------------------------------------------------
+def build_input_row(
+    disorder: str,
+    symptom_severity: float,
+    mood: float,
+    sleep: float,
+    activity: float,
+    stress: float,
+    progress: float,
+    adherence: float,
+    emotion: str
+):
+    """
+    Creates a DataFrame row matching the training feature schema.
+    """
+
+    data = {
+        "Symptom Severity (1-10)": [symptom_severity],
+        "Mood Score (1-10)": [mood],
+        "Sleep Quality (1-10)": [sleep],
+        "Physical Activity (hrs/week)": [activity],
+        "Stress Level (1-10)": [stress],
+        "Treatment Progress (1-10)": [progress],
+        "Adherence to Treatment (%)": [adherence],
+        "Diagnosis": [disorder],
+        "AI-Detected Emotional State": [emotion]
+    }
+
+    return pd.DataFrame(data)
+
+
+# ---------------------------------------------------------
+# Main Prediction Function
+# ---------------------------------------------------------
+def predict_treatment_pattern(
+    disorder: str,
+    symptoms: float,
+    mood: float,
+    sleep: float,
+    activity: float,
+    stress: float,
+    progress: float,
+    adherence: float,
+    emotion: str
+):
+    """
+    Runs Model C inference and returns:
+    - cluster (string)
+    - focus (string)
+    - methods (list of strings)
+    """
+
+    # Build input row
+    X = build_input_row(
+        disorder,
+        symptoms,
+        mood,
+        sleep,
+        activity,
+        stress,
+        progress,
+        adherence,
+        emotion
+    )
+
+    # Predict (returns encoded integers + method flags)
+    pred = model.predict(X)[0]
+
+    # Decode cluster + focus
+    cluster_encoded = int(pred[0])
+    focus_encoded = int(pred[1])
+
+    cluster = le_cluster.inverse_transform([cluster_encoded])[0]
+    focus = le_focus.inverse_transform([focus_encoded])[0]
+
+    # Decode multi-label methods
+    method_flags = np.array(pred[2:], dtype=int).reshape(1, -1)
+    methods = mlb.inverse_transform(method_flags)[0]
+
+    return {
+        "cluster": cluster,
+        "focus": focus,
+        "methods": list(methods)
+    }
+
+
+# ---------------------------------------------------------
+# Optional: Quick test
+# ---------------------------------------------------------
+if __name__ == "__main__":
+    result = predict_treatment_pattern(
+        disorder="Major Depressive Disorder",
+        symptoms=9,
+        mood=5,
+        sleep=4,
+        activity=3,
+        stress=8,
+        progress=6,
+        adherence=70,
+        emotion="Anxious"
+    )
+
+    print("\nPrediction Result:")
+    print(result)

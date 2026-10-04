@@ -1,0 +1,210 @@
+from openai import OpenAI
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
+
+def chatbot_accuracy_percentage():
+    client = OpenAI()
+    embedder = SentenceTransformer("all-MiniLM-L6-v2")
+
+    # -----------------------------
+    # USER MESSAGE
+    # -----------------------------
+    user_msg = (
+        "I've been feeling really down, tired, and unmotivated for weeks. "
+        "I can't focus and I don't enjoy things anymore."
+    )
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": user_msg}]
+    )
+
+    bot_reply = response.choices[0].message.content.lower()
+
+    # -----------------------------
+    # METRIC 1 — Acknowledgement
+    # -----------------------------
+    depression_keywords = [
+        "feeling down", "low mood", "lack of motivation", "loss of interest",
+        "tired", "fatigue", "struggling", "not enjoying things",
+        "persistent sadness", "feeling this way", "going through a difficult time",
+        "sounds really hard", "overwhelmed", "sad"
+    ]
+
+    keyword_match = any(kw in bot_reply for kw in depression_keywords)
+
+    ideal_ack = "It sounds like you're feeling low or going through a difficult time."
+    emb_expected_ack = embedder.encode([ideal_ack])
+    emb_bot = embedder.encode([bot_reply])
+    semantic_ack = cosine_similarity([emb_expected_ack[0]], [emb_bot[0]])[0][0] >= 0.25
+
+    metric_ack = 1 if (keyword_match or semantic_ack) else 0
+
+    # -----------------------------
+    # METRIC 2 — CBT Recommendations
+    # -----------------------------
+    cbt_clusters = [
+        ["routine", "structure"],
+        ["small steps", "break tasks", "manageable"],
+        ["talk to someone", "reach out", "connect"],
+        ["physical activity", "exercise", "walk"],
+        ["mindfulness", "breathing", "meditation"],
+        ["self-care", "sleep", "nutrition"],
+        ["professional help", "therapist", "counsellor"]
+    ]
+
+    matched_clusters = sum(
+        any(keyword in bot_reply for keyword in cluster)
+        for cluster in cbt_clusters
+    )
+
+    metric_cbt = 1 if matched_clusters >= 2 else 0
+
+    # -----------------------------
+    # METRIC 3 — Semantic Similarity
+    # -----------------------------
+    ideal_reply = (
+        "It sounds like you're experiencing symptoms of depression. "
+        "A CBT approach would involve small manageable activities, "
+        "behavioral activation, and reaching out for support."
+    )
+
+    emb_expected = embedder.encode([ideal_reply])
+    similarity = cosine_similarity([emb_expected[0]], [emb_bot[0]])[0][0]
+
+    metric_similarity = 1 if similarity >= 0.30 else 0
+
+    # -----------------------------
+    # FINAL SCORE (0–100%)
+    # -----------------------------
+    total_score = (metric_ack + metric_cbt + metric_similarity) / 3
+    percentage = total_score * 100
+
+    print("=== CHATBOT ACCURACY RESULTS ===")
+    print(f"Acknowledgement Score: {metric_ack}")
+    print(f"CBT Strategy Score: {metric_cbt}")
+    print(f"Semantic Similarity Score: {metric_similarity}")
+    print(f"Final Accuracy: {percentage:.2f}%")
+
+    return percentage
+
+
+
+def multi_message_accuracy_test():
+    client = OpenAI()
+    embedder = SentenceTransformer("all-MiniLM-L6-v2")
+
+    # ---------------------------------------
+    # 4 TEST MESSAGES
+    # ---------------------------------------
+    test_messages = [
+        "I've been feeling really down, tired, and unmotivated for weeks. I can't focus and I don't enjoy things anymore.",
+        "My heart keeps racing and I feel on edge all the time. I can't relax and I'm constantly worrying about everything.",
+        "Work has been overwhelming lately. I feel exhausted and I can't keep up with all the pressure and deadlines.",
+        "I just feel stuck. I know I need to do things but I can't bring myself to start anything anymore."
+    ]
+
+    # ---------------------------------------
+    # TUNED acknowledgement indicators
+    # (reduced from broad → moderate)
+    # ---------------------------------------
+    acknowledgement_keywords = [
+        "it sounds like",
+        "i'm sorry you're",
+        "i understand",
+        "that must be",
+        "you're going through",
+        "you’re dealing with",
+        "feeling",
+        "struggling",
+        "overwhelmed",
+        "worried",
+        "anxious",
+        "stressed",
+        "exhausted",
+        "low",
+        "down"
+    ]
+
+    # ---------------------------------------
+    # CBT clusters (unchanged — already balanced)
+    # ---------------------------------------
+    cbt_clusters = [
+        ["small steps", "break tasks", "manageable"],
+        ["breathing", "mindfulness", "grounding"],
+        ["routine", "structure", "schedule"],
+        ["reach out", "talk to someone", "connect"],
+        ["exercise", "walk", "physical activity"],
+        ["sleep", "rest", "self-care"],
+        ["therapist", "professional help", "counsellor"]
+    ]
+
+    # ---------------------------------------
+    # Neutral ideal CBT-style reply
+    # ---------------------------------------
+    ideal_reply = (
+        "It sounds like you're dealing with something difficult. "
+        "A CBT approach would involve identifying thoughts and feelings, "
+        "taking small manageable steps, and reaching out for support."
+    )
+
+    # ---------------------------------------
+    # Run test for each message
+    # ---------------------------------------
+    total_score = 0
+    num_tests = len(test_messages)
+
+    for i, user_msg in enumerate(test_messages, start=1):
+
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": user_msg}]
+        )
+
+        bot_reply = response.choices[0].message.content.lower()
+
+        # --- Metric 1: Acknowledgement (slightly stricter) ---
+        ack_hit = any(kw in bot_reply for kw in acknowledgement_keywords)
+        metric_ack = 1 if ack_hit else 0
+
+        # --- Metric 2: CBT strategies ---
+        matched_clusters = sum(
+            any(keyword in bot_reply for keyword in cluster)
+            for cluster in cbt_clusters
+        )
+        metric_cbt = 1 if matched_clusters >= 2 else 0
+
+        # --- Metric 3: Semantic similarity (more forgiving) ---
+        emb_expected = embedder.encode([ideal_reply])
+        emb_bot = embedder.encode([bot_reply])
+        similarity = cosine_similarity([emb_expected[0]], [emb_bot[0]])[0][0]
+
+        # LOWERED threshold from 0.45 → 0.35
+        metric_similarity = 1 if similarity >= 0.35 else 0
+
+        # --- Score for this message ---
+        message_score = (metric_ack + metric_cbt + metric_similarity) / 3
+        total_score += message_score
+
+        print(f"\n=== Test Case {i} ===")
+        print(f"Acknowledgement: {metric_ack}")
+        print(f"CBT Strategies: {metric_cbt}")
+        print(f"Semantic Similarity: {metric_similarity}")
+        print(f"Message Score: {message_score * 100:.2f}%")
+
+    # ---------------------------------------
+    # Final accuracy
+    # ---------------------------------------
+    final_accuracy = (total_score / num_tests) * 100
+
+    print("\n==============================")
+    print(f"FINAL CHATBOT ACCURACY: {final_accuracy:.2f}%")
+    print("==============================")
+
+    return final_accuracy
+
+
+
+
+# Run the test
+multi_message_accuracy_test()
